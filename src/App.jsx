@@ -48,6 +48,10 @@ export default function App() {
 	const hasMounted = useRef(false);
 	const isInitialLoad = useRef(true);
 
+	// Index readiness from server
+	const [serverReady, setServerReady] = useState(false);
+	const [serverIndexing, setServerIndexing] = useState(false);
+
 	// ── Core loader ─────────────────────────────────────────────────────────────
 	// opts: { recursive?: bool, category?: string }
 	// When recursive is on, category is passed to the server so it filters there.
@@ -73,6 +77,10 @@ export default function App() {
 					url += `&category=${encodeURIComponent(useCategory)}`;
 
 				const res = await fetch(url);
+				if (res.status === 503) {
+					// Index not ready yet — silently ignore, status poller will retry
+					return;
+				}
 				const data = await res.json();
 				if (data.error) throw new Error(data.error);
 
@@ -110,9 +118,35 @@ export default function App() {
 		[recursive, activeTab],
 	);
 
-	// Initial load — use path from URL if present
+	// Poll /api/status on mount; load dir once index is ready
 	useEffect(() => {
-		loadDir(getPathFromUrl());
+		let cancelled = false;
+		let hasLoaded = false;
+		async function poll() {
+			try {
+				const res = await fetch("/api/status");
+				const data = await res.json();
+				if (cancelled) return;
+				setServerIndexing(data.indexing);
+				if (data.ready) {
+					setServerReady(true);
+					if (!hasLoaded) {
+						hasLoaded = true;
+						loadDir(getPathFromUrl());
+					}
+					// Keep polling while a background rebuild is running (to hide banner)
+					if (data.indexing && !cancelled) setTimeout(poll, 2000);
+					return;
+				}
+			} catch {
+				/* server not yet up */
+			}
+			if (!cancelled) setTimeout(poll, 800);
+		}
+		poll();
+		return () => {
+			cancelled = true;
+		};
 	}, []); // eslint-disable-line
 
 	// Keep refs in sync with state for use in loadMore
@@ -327,48 +361,120 @@ export default function App() {
 
 	return (
 		<>
-			<Header
-				breadcrumb={breadcrumb}
-				onNavigate={loadDir}
-				search={search}
-				onSearch={setSearch}
-			/>
-			<FileBrowser
-				items={items}
-				counts={counts}
-				loading={loading}
-				error={error}
-				activeTab={activeTab}
-				onTabChange={handleTabChange}
-				viewMode={viewMode}
-				onViewChange={setViewMode}
-				search={search}
-				recursive={recursive}
-				onRecursiveToggle={handleRecursiveToggle}
-				onNavigate={loadDir}
-				onOpenCarousel={openCarousel}
-				onOpenViewer={openViewer}
-				hasMore={hasMore}
-				loadingMore={loadingMore}
-				onLoadMore={loadMore}
-			/>
-			{carousel.open && (
-				<Carousel
-					items={carousel.items}
-					startIndex={carousel.index}
-					onClose={closeCarousel}
-					togglestate={showWithoutFilter}
-					toggleShowWithoutFilter={handleToggleShowWithoutFilter}
-					hasMore={hasMore}
-					onNearEnd={loadMore}
-				/>
+			{!serverReady && (
+				<div
+					style={{
+						display: "flex",
+						flexDirection: "column",
+						alignItems: "center",
+						justifyContent: "center",
+						height: "100dvh",
+						gap: "16px",
+						color: "#888",
+					}}
+				>
+					<div style={{ fontSize: "2.5rem", lineHeight: 1 }}>⬡</div>
+					<div style={{ fontSize: "1rem", letterSpacing: ".04em" }}>
+						Indexing files…
+					</div>
+					<div
+						style={{
+							width: "200px",
+							height: "3px",
+							background: "#2a2a2a",
+							borderRadius: "2px",
+							overflow: "hidden",
+						}}
+					>
+						<div
+							style={{
+								height: "100%",
+								background: "#4a9eff",
+								borderRadius: "2px",
+								animation: "fsbar 1.4s ease-in-out infinite",
+							}}
+						/>
+					</div>
+					<style>{`@keyframes fsbar{0%{width:0%;margin-left:0%}50%{width:60%;margin-left:20%}100%{width:0%;margin-left:100%}}`}</style>
+				</div>
 			)}
-			{viewerItem && (
-				<FileViewer
-					item={viewerItem}
-					onClose={closeViewer}
-					onUnzip={handleUnzip}
-				/>
+			{serverReady && serverIndexing && (
+				<div
+					style={{
+						position: "fixed",
+						bottom: "16px",
+						right: "16px",
+						background: "#1e1e1e",
+						border: "1px solid #333",
+						borderRadius: "6px",
+						padding: "8px 14px",
+						fontSize: "0.78rem",
+						color: "#888",
+						zIndex: 9999,
+						display: "flex",
+						alignItems: "center",
+						gap: "8px",
+					}}
+				>
+					<div
+						style={{
+							width: "8px",
+							height: "8px",
+							borderRadius: "50%",
+							background: "#4a9eff",
+							animation: "fspulse 1s ease-in-out infinite alternate",
+						}}
+					/>
+					Refreshing index…
+					<style>{`@keyframes fspulse{from{opacity:.3}to{opacity:1}}`}</style>
+				</div>
+			)}
+			{serverReady && (
+				<>
+					<Header
+						breadcrumb={breadcrumb}
+						onNavigate={loadDir}
+						search={search}
+						onSearch={setSearch}
+					/>
+					<FileBrowser
+						items={items}
+						counts={counts}
+						loading={loading}
+						error={error}
+						activeTab={activeTab}
+						onTabChange={handleTabChange}
+						viewMode={viewMode}
+						onViewChange={setViewMode}
+						search={search}
+						recursive={recursive}
+						onRecursiveToggle={handleRecursiveToggle}
+						onNavigate={loadDir}
+						onOpenCarousel={openCarousel}
+						onOpenViewer={openViewer}
+						hasMore={hasMore}
+						loadingMore={loadingMore}
+						onLoadMore={loadMore}
+					/>
+					{carousel.open && (
+						<Carousel
+							items={carousel.items}
+							startIndex={carousel.index}
+							onClose={closeCarousel}
+							togglestate={showWithoutFilter}
+							toggleShowWithoutFilter={handleToggleShowWithoutFilter}
+							hasMore={hasMore}
+							onNearEnd={loadMore}
+						/>
+					)}
+					{viewerItem && (
+						<FileViewer
+							item={viewerItem}
+							onClose={closeViewer}
+							onUnzip={handleUnzip}
+						/>
+					)}
+				</>
 			)}
 		</>
 	);

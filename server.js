@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url'
 import { createRequire } from 'module'
 import mime from 'mime-types'
 import os from 'os'
+import crypto from 'crypto'
 
 const require = createRequire(import.meta.url)
 const AdmZip = require('adm-zip')
@@ -19,7 +20,13 @@ app.use(express.json())
 
 const ROOT_DIR = path.resolve(process.argv[2] || process.env.SHARE_DIR || '.')
 const REAL_ROOT = fs.realpathSync(ROOT_DIR)
+// Cache file is keyed to the shared directory so each share has its own index
+const INDEX_CACHE_FILE = path.join(
+  os.tmpdir(),
+  `fileserve_${crypto.createHash('md5').update(REAL_ROOT).digest('hex').slice(0, 8)}.json`
+)
 
+console.log(`Sharing directory: ${REAL_ROOT}`, `\nIndex cache file: ${INDEX_CACHE_FILE}`)
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function getLocalIPs() {
   const result = []
@@ -98,8 +105,173 @@ function makeCounts(items) {
   return c
 }
 
+// ── File Index ────────────────────────────────────────────────────────────────
+const fileIndex = new Map()    // relPath → entry
+const dirChildren = new Map()  // dirPath → entry[] (pre-sorted, O(1) lookup)
+let indexReady = false
+let indexing = false
+
+function getParentDir(relPath) {
+  const i = relPath.lastIndexOf('/')
+  return i === -1 ? '' : relPath.slice(0, i)
+}
+
+function buildDirChildren() {
+  dirChildren.clear()
+  dirChildren.set('', [])
+  for (const entry of fileIndex.values()) {
+    const parent = getParentDir(entry.path)
+    let arr = dirChildren.get(parent)
+    if (!arr) { arr = []; dirChildren.set(parent, arr) }
+    arr.push(entry)
+  }
+  // Pre-sort each directory: folders first, then name
+  for (const arr of dirChildren.values()) {
+    arr.sort((a, b) => {
+      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
+      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+    })
+  }
+}
+
+// DFS over dirChildren — only touches entries in the target subtree
+function collectFilesRecursive(rootPath) {
+  const result = []
+  const stack = [rootPath]
+  while (stack.length) {
+    const dir = stack.pop()
+    for (const entry of dirChildren.get(dir) ?? []) {
+      if (entry.isDirectory) stack.push(entry.path)
+      else result.push(entry)
+    }
+  }
+  return result
+}
+
+// Persist index so restarts are instant
+function saveIndex() {
+  try {
+    fs.writeFileSync(
+      INDEX_CACHE_FILE,
+      JSON.stringify({ v: 1, root: REAL_ROOT, entries: [...fileIndex.values()] }),
+      'utf8'
+    )
+  } catch (e) { console.warn('Failed to save index cache:', e.message) }
+}
+
+let saveTimer = null
+function scheduleSave() {
+  clearTimeout(saveTimer)
+  saveTimer = setTimeout(saveIndex, 2000)
+}
+
+async function loadIndex() {
+  try {
+    if (!fs.existsSync(INDEX_CACHE_FILE)) return false
+    const raw = await fs.promises.readFile(INDEX_CACHE_FILE, 'utf8')
+    // Yield before the potentially heavy JSON.parse so the event loop stays free
+    await new Promise(resolve => setImmediate(resolve))
+    const data = JSON.parse(raw)
+    if (data.v !== 1 || data.root !== REAL_ROOT) return false
+    fileIndex.clear()
+    for (const e of data.entries) fileIndex.set(e.path, e)
+    buildDirChildren()
+    indexReady = true
+    console.log(`Index restored from cache: ${fileIndex.size} entries`)
+    return true
+  } catch (e) {
+    console.warn('Failed to load index cache:', e.message)
+    return false
+  }
+}
+
+async function buildIndex() {
+  indexing = true
+  console.log('Building file index...')
+  const t = Date.now()
+  const all = await walkDirAsync(REAL_ROOT, '')
+  fileIndex.clear()
+  for (const entry of all) fileIndex.set(entry.path, entry)
+  indexReady = true
+  indexing = false
+  console.log(`Index ready: ${fileIndex.size} entries in ${Date.now() - t}ms`)
+  buildDirChildren()
+  saveIndex()
+}
+
+const pendingChanges = new Set()
+let rebuildTimer = null
+
+function scheduleUpdate(relPathRaw) {
+  const relPath = relPathRaw.replace(/\\/g, '/')
+  if (path.basename(relPath).startsWith('.')) return
+  pendingChanges.add(relPath)
+  clearTimeout(rebuildTimer)
+  rebuildTimer = setTimeout(flushChanges, 300)
+}
+
+async function flushChanges() {
+  for (const relPath of pendingChanges) {
+    const fullPath = path.join(REAL_ROOT, relPath)
+    if (!fs.existsSync(fullPath)) {
+      const prefix = relPath + '/'
+      for (const key of fileIndex.keys()) {
+        if (key === relPath || key.startsWith(prefix)) fileIndex.delete(key)
+      }
+    } else {
+      const name = path.basename(relPath)
+      try {
+        const s = fs.statSync(fullPath)
+        const isDir = s.isDirectory()
+        fileIndex.set(relPath, {
+          name, isDirectory: isDir, size: s.size,
+          sizeHuman: !isDir ? fmtSize(s.size) : null,
+          mtime: s.mtime, path: relPath,
+          category: isDir ? 'folder' : categorize(name),
+          ext: path.extname(name).toLowerCase(),
+        })
+        if (isDir) {
+          const newEntries = await walkDirAsync(fullPath, relPath)
+          for (const e of newEntries) fileIndex.set(e.path, e)
+        }
+      } catch { /* file disappeared */ }
+    }
+  }
+  pendingChanges.clear()
+  buildDirChildren()
+  scheduleSave() // persist watcher-driven changes
+}
+
+function startWatcher() {
+  try {
+    fs.watch(REAL_ROOT, { recursive: true }, (_event, filename) => {
+      if (filename) scheduleUpdate(filename)
+    })
+    console.log('File watcher active')
+  } catch (e) {
+    console.warn('File watcher unavailable:', e.message)
+  }
+}
+
+// Await loadIndex first so buildIndex doesn't race and overwrite a valid cache restore
+async function startup() {
+  await loadIndex()
+  buildIndex()   // fire-and-forget: runs in background, server is already listening
+  startWatcher()
+}
+startup()
+
+// ── API: status ─────────────────────────────────────────────────────────────────
+app.get('/api/status', (_req, res) => {
+  res.json({ ready: indexReady, indexing, total: fileIndex.size })
+})
+
 // ── API: list directory ───────────────────────────────────────────────────────
 app.get('/api/files', (req, res) => {
+  if (!indexReady) {
+    return res.status(503).json({ error: 'Indexing in progress', indexing: true })
+  }
+
   const reqPath = req.query.path || ''
   const recursive = req.query.recursive === 'true'
   // category can be a single value or comma-separated list e.g. "image,video"
@@ -109,67 +281,32 @@ app.get('/api/files', (req, res) => {
     : categoryParam.split(',').map(c => c.trim()).filter(Boolean)
   const offset = Math.max(0, parseInt(req.query.offset) || 0)
   const limit = Math.min(2000, Math.max(1, parseInt(req.query.limit) || 200))
+
+  // Security: validate the path is inside REAL_ROOT
   const full = safePath(reqPath)
-
   if (!full) return res.status(403).json({ error: 'Forbidden' })
-  if (!fs.existsSync(full)) return res.status(404).json({ error: 'Not found' })
 
-  const stat = fs.statSync(full)
-  if (!stat.isDirectory()) return res.status(400).json({ error: 'Not a directory' })
+  // Existence check against the index
+  if (reqPath !== '' && !dirChildren.has(reqPath)) return res.status(404).json({ error: 'Not found' })
 
   const parts = reqPath ? reqPath.split('/').filter(Boolean) : []
   const breadcrumb = [{ name: 'Home', path: '' }]
   parts.forEach((p, i) => breadcrumb.push({ name: p, path: parts.slice(0, i + 1).join('/') }))
 
   if (recursive) {
-    // Walk full tree — files only — then compute counts, then filter
-    const allFiles = walkDir(full, reqPath).filter(i => !i.isDirectory)
+    const allFiles = collectFilesRecursive(reqPath)
     allFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
 
     const counts = makeCounts(allFiles)
-    console.log(`Total files before category filter: ${counts.all}`, categories)
-    const filtered = categories
-      ? allFiles.filter(i => categories.includes(i.category))
-      : allFiles
-
-    console.log(`Total files after category filter: ${filtered.length} (category=${categoryParam})`)
-
+    const filtered = categories ? allFiles.filter(i => categories.includes(i.category)) : allFiles
     const total = filtered.length
     const items = filtered.slice(offset, offset + limit)
-    console.log(`Recursive load: ${total} items (category=${categoryParam}, offset=${offset}, limit=${limit})`)
 
     return res.json({ items, counts, total, currentPath: reqPath, breadcrumb, recursive: true })
   }
 
-  // Non-recursive: shallow read
-  let entries
-  try { entries = fs.readdirSync(full, { withFileTypes: true }) }
-  catch (e) { return res.status(500).json({ error: e.message }) }
-
-  const items = []
-  for (const entry of entries) {
-    if (entry.name.startsWith('.')) continue
-    const itemPath = path.join(full, entry.name)
-    let size = 0, mtime = null
-    try { const s = fs.statSync(itemPath); size = s.size; mtime = s.mtime } catch { }
-
-    const relPath = (reqPath ? reqPath + '/' : '') + entry.name
-    items.push({
-      name: entry.name,
-      isDirectory: entry.isDirectory(),
-      size,
-      sizeHuman: entry.isFile() ? fmtSize(size) : null,
-      mtime,
-      path: relPath.replace(/\\/g, '/'),
-      category: entry.isDirectory() ? 'folder' : categorize(entry.name),
-      ext: path.extname(entry.name).toLowerCase(),
-    })
-  }
-
-  items.sort((a, b) => {
-    if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
-  })
+  // Non-recursive: O(1) — dirChildren already sorted (folders first, then by name)
+  const items = dirChildren.get(reqPath) ?? []
 
   const counts = makeCounts(items)
   const total = items.length
