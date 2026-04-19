@@ -1,0 +1,91 @@
+.wrap {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	cursor: pointer;
+	user-select: none;
+}
+.wrap.disabled {
+	opacity: 0.4;
+	pointer-events: none;
+}
+
+/* Hide native checkbox */
+.input {
+	position: absolute;
+	opacity: 0;
+	width: 0;
+	height: 0;
+	pointer-events: none;
+}
+
+/* Track */
+.track {
+	position: relative;
+	border-radius: 99px;
+	background: var(--s3);
+	border: 1px solid var(--border2);
+	transition:
+		background 0.2s,
+		border-color 0.2s;
+	flex-shrink: 0;
+}
+.trackOn {
+	background: rgba(232, 160, 32, 0.18);
+	border-color: rgba(232, 160, 32, 0.45);
+}
+
+/* Thumb */
+.thumb {
+	position: absolute;
+	top: 50%;
+	transform: translateY(-50%);
+	border-radius: 50%;
+	background: var(--muted);
+	transition:
+		left 0.2s,
+		background 0.2s;
+}
+.thumbOn {
+	background: var(--accent);
+}
+
+/* Size: md (default) */
+.size_md .track {
+	width: 34px;
+	height: 18px;
+}
+.size_md .thumb {
+	width: 12px;
+	height: 12px;
+	left: 3px;
+}
+.size_md .thumbOn {
+	left: 19px;
+}
+
+/* Size: sm */
+.size_sm .track {
+	width: 26px;
+	height: 14px;
+}
+.size_sm .thumb {
+	width: 9px;
+	height: 9px;
+	left: 2px;
+}
+.size_sm .thumbOn {
+	left: 15px;
+}
+
+/* Label */
+.label {
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--muted);
+	transition: color 0.15s;
+	white-space: nowrap;
+}
+.wrap:hover .label {
+	color: var(--text);
+}
