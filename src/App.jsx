@@ -4,8 +4,14 @@ import FileBrowser from "./components/FileBrowser.jsx";
 import Carousel from "./components/Carousel.jsx";
 import FileViewer from "./components/FileViewer.jsx";
 
+const PAGE_SIZE = 200;
+
+function getPathFromUrl() {
+	return new URLSearchParams(window.location.search).get("path") || "";
+}
+
 export default function App() {
-	const [currentPath, setCurrentPath] = useState("");
+	const [currentPath, setCurrentPath] = useState(getPathFromUrl);
 	const [items, setItems] = useState([]);
 	const [counts, setCounts] = useState({});
 	const [breadcrumb, setBreadcrumb] = useState([{ name: "Home", path: "" }]);
@@ -27,8 +33,20 @@ export default function App() {
 	// FileViewer
 	const [viewerItem, setViewerItem] = useState(null);
 
+	// Pagination
+	const [hasMore, setHasMore] = useState(false);
+	const [loadingMore, setLoadingMore] = useState(false);
+	// Stable refs so loadMore callback never goes stale
+	const hasMoreRef = useRef(false);
+	const loadingMoreRef = useRef(false);
+	const currentPathRef = useRef("");
+	const recursiveRef = useRef(false);
+	const activeTabRef = useRef("all");
+	const itemsLenRef = useRef(0);
+
 	// Avoid double-load on mount for the tab-change effect
 	const hasMounted = useRef(false);
+	const isInitialLoad = useRef(true);
 
 	// ── Core loader ─────────────────────────────────────────────────────────────
 	// opts: { recursive?: bool, category?: string }
@@ -50,7 +68,7 @@ export default function App() {
 			setSearch("");
 
 			try {
-				let url = `/api/files?path=${encodeURIComponent(dirPath)}&recursive=${useRecursive}`;
+				let url = `/api/files?path=${encodeURIComponent(dirPath)}&recursive=${useRecursive}&offset=0&limit=${PAGE_SIZE}`;
 				if (useCategory && useCategory !== "all")
 					url += `&category=${encodeURIComponent(useCategory)}`;
 
@@ -62,6 +80,27 @@ export default function App() {
 				setCounts(data.counts || {});
 				setBreadcrumb(data.breadcrumb);
 				setCurrentPath(dirPath);
+				currentPathRef.current = dirPath;
+				const more = data.items.length < (data.total ?? data.items.length);
+				setHasMore(more);
+				hasMoreRef.current = more;
+				itemsLenRef.current = data.items.length;
+
+				// Sync URL
+				if (!opts.skipHistory) {
+					const newUrl = new URL(window.location.href);
+					if (dirPath) {
+						newUrl.searchParams.set("path", dirPath);
+					} else {
+						newUrl.searchParams.delete("path");
+					}
+					if (isInitialLoad.current) {
+						window.history.replaceState({ path: dirPath }, "", newUrl);
+						isInitialLoad.current = false;
+					} else {
+						window.history.pushState({ path: dirPath }, "", newUrl);
+					}
+				}
 			} catch (e) {
 				setError(e.message);
 			} finally {
@@ -71,10 +110,63 @@ export default function App() {
 		[recursive, activeTab],
 	);
 
-	// Initial load
+	// Initial load — use path from URL if present
 	useEffect(() => {
-		loadDir("");
+		loadDir(getPathFromUrl());
 	}, []); // eslint-disable-line
+
+	// Keep refs in sync with state for use in loadMore
+	useEffect(() => {
+		recursiveRef.current = recursive;
+	}, [recursive]);
+	useEffect(() => {
+		activeTabRef.current = activeTab;
+	}, [activeTab]);
+
+	// Browser back / forward
+	useEffect(() => {
+		const handlePopState = (e) => {
+			const path = e.state?.path ?? getPathFromUrl();
+			loadDir(path, { skipHistory: true });
+		};
+		window.addEventListener("popstate", handlePopState);
+		return () => window.removeEventListener("popstate", handlePopState);
+	}, [loadDir]);
+
+	// ── Load more (pagination) ───────────────────────────────────────────────────
+	const loadMore = useCallback(async () => {
+		if (loadingMoreRef.current || !hasMoreRef.current) return;
+		loadingMoreRef.current = true;
+		setLoadingMore(true);
+		try {
+			const dirPath = currentPathRef.current;
+			const useRecursive = recursiveRef.current;
+			const tab = activeTabRef.current;
+			const offset = itemsLenRef.current;
+			const useCategory = useRecursive && tab !== "all" ? tab : null;
+
+			let url = `/api/files?path=${encodeURIComponent(dirPath)}&recursive=${useRecursive}&offset=${offset}&limit=${PAGE_SIZE}`;
+			if (useCategory) url += `&category=${encodeURIComponent(useCategory)}`;
+
+			const res = await fetch(url);
+			const data = await res.json();
+			if (data.error) throw new Error(data.error);
+
+			setItems((prev) => {
+				const next = [...prev, ...data.items];
+				itemsLenRef.current = next.length;
+				const more = next.length < (data.total ?? next.length);
+				hasMoreRef.current = more;
+				setHasMore(more);
+				return next;
+			});
+		} catch {
+			// silently ignore load-more errors
+		} finally {
+			loadingMoreRef.current = false;
+			setLoadingMore(false);
+		}
+	}, []);
 
 	// Reload when tab changes IF recursive is active (server needs to re-filter)
 	useEffect(() => {
@@ -105,6 +197,21 @@ export default function App() {
 	}, []);
 
 	// ── Carousel ─────────────────────────────────────────────────────────────────
+	// When loadMore appends items, mirror new media entries into the open carousel
+	useEffect(() => {
+		if (!carousel.open) return;
+		const filterCategory =
+			activeTab === "all" || showWithoutFilter
+				? ["image", "video"]
+				: [activeTab];
+		const allMedia = items.filter(
+			(i) => i.category && filterCategory.includes(i.category),
+		);
+		if (allMedia.length > carousel.items.length) {
+			setCarousel((c) => ({ ...c, items: allMedia }));
+		}
+	}, [items]); // eslint-disable-line
+
 	const openCarousel = useCallback(
 		(clickedItem) => {
 			const filterCategory =
@@ -209,6 +316,9 @@ export default function App() {
 				onNavigate={loadDir}
 				onOpenCarousel={openCarousel}
 				onOpenViewer={openViewer}
+				hasMore={hasMore}
+				loadingMore={loadingMore}
+				onLoadMore={loadMore}
 			/>
 			{carousel.open && (
 				<Carousel
@@ -217,6 +327,8 @@ export default function App() {
 					onClose={closeCarousel}
 					togglestate={showWithoutFilter}
 					toggleShowWithoutFilter={handleToggleShowWithoutFilter}
+					hasMore={hasMore}
+					onNearEnd={loadMore}
 				/>
 			)}
 			{viewerItem && (

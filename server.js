@@ -103,6 +103,8 @@ app.get('/api/files', (req, res) => {
   const reqPath = req.query.path || ''
   const recursive = req.query.recursive === 'true'
   const category = req.query.category || 'all'   // server-side filter (used when recursive)
+  const offset = Math.max(0, parseInt(req.query.offset) || 0)
+  const limit = Math.min(2000, Math.max(1, parseInt(req.query.limit) || 200))
   const full = safePath(reqPath)
 
   if (!full) return res.status(403).json({ error: 'Forbidden' })
@@ -121,11 +123,15 @@ app.get('/api/files', (req, res) => {
     allFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
 
     const counts = makeCounts(allFiles)
-    const items = category && category !== 'all'
+    const filtered = category && category !== 'all'
       ? allFiles.filter(i => i.category === category)
       : allFiles
 
-    return res.json({ items, counts, currentPath: reqPath, breadcrumb, recursive: true })
+    const total = filtered.length
+    const items = filtered.slice(offset, offset + limit)
+    console.log(`Recursive load: ${total} items (category=${category}, offset=${offset}, limit=${limit})`)
+
+    return res.json({ items, counts, total, currentPath: reqPath, breadcrumb, recursive: true })
   }
 
   // Non-recursive: shallow read
@@ -159,7 +165,9 @@ app.get('/api/files', (req, res) => {
   })
 
   const counts = makeCounts(items)
-  res.json({ items, counts, currentPath: reqPath, breadcrumb, recursive: false })
+  const total = items.length
+  const pagedItems = items.slice(offset, offset + limit)
+  res.json({ items: pagedItems, counts, total, currentPath: reqPath, breadcrumb, recursive: false })
 })
 
 // ── API: unzip ────────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useRef, useState, useEffect, useCallback } from "react";
 import styles from "./FileBrowser.module.css";
 import Toggle from "./Toggle.jsx";
 
@@ -46,6 +46,9 @@ export default function FileBrowser({
 	onNavigate,
 	onOpenCarousel,
 	onOpenViewer,
+	hasMore,
+	loadingMore,
+	onLoadMore,
 }) {
 	// In recursive mode the server already filtered by category,
 	// so we only need to apply search client-side.
@@ -71,6 +74,22 @@ export default function FileBrowser({
 		// Audio, documents, and other — all go through FileViewer
 		if (onOpenViewer) onOpenViewer(item);
 	}
+
+	// Sentinel for triggering more loads
+	const sentinelRef = useRef(null);
+	useEffect(() => {
+		if (!onLoadMore || !hasMore) return;
+		const el = sentinelRef.current;
+		if (!el) return;
+		const io = new IntersectionObserver(
+			([entry]) => {
+				if (entry.isIntersecting) onLoadMore();
+			},
+			{ threshold: 0.1 },
+		);
+		io.observe(el);
+		return () => io.disconnect();
+	}, [onLoadMore, hasMore, filtered]); // re-attach when filtered list changes
 
 	if (loading)
 		return (
@@ -161,6 +180,12 @@ export default function FileBrowser({
 				) : (
 					<ListView items={filtered} onClickItem={handleClick} />
 				)}
+				{hasMore && <div ref={sentinelRef} className={styles.sentinel} />}
+				{loadingMore && (
+					<div className={styles.loadingMoreRow}>
+						<div className={styles.spinner} />
+					</div>
+				)}
 			</main>
 		</div>
 	);
@@ -194,13 +219,15 @@ function GridView({ items, activeTab, onClickItem }) {
 							{g.label} <span>{g.items.length}</span>
 						</div>
 					)}
-					<div
-						className={`${styles.grid} ${g.key === "image" || g.key === "video" ? styles.mediaGrid : ""}`}
-					>
-						{g.items.map((item) => (
-							<GridCard key={item.path} item={item} onClick={onClickItem} />
-						))}
-					</div>
+					{g.key === "image" || g.key === "video" ? (
+						<VirtualMediaGrid items={g.items} onClickItem={onClickItem} />
+					) : (
+						<div className={styles.grid}>
+							{g.items.map((item) => (
+								<GridCard key={item.path} item={item} onClick={onClickItem} />
+							))}
+						</div>
+					)}
 				</div>
 			))}
 		</div>
@@ -282,6 +309,120 @@ function GridCard({ item, onClick }) {
 				>
 					<DownloadIcon />
 				</a>
+			)}
+		</div>
+	);
+}
+
+// ── Virtual Media Grid ───────────────────────────────────────────────────────
+const MEDIA_MIN_COL = 200;
+const GRID_GAP = 10;
+const OVERSCAN_ROWS = 3;
+const VIRTUAL_THRESHOLD = 40;
+
+function VirtualMediaGrid({ items, onClickItem }) {
+	const outerRef = useRef(null);
+	const scrollElRef = useRef(null);
+	const [range, setRange] = useState(() => ({
+		startIdx: 0,
+		endIdx: Math.min(items.length, VIRTUAL_THRESHOLD * 2),
+		paddingTop: 0,
+		paddingBottom: 0,
+		cols: 4,
+	}));
+
+	const computeRange = useCallback(() => {
+		const outer = outerRef.current;
+		const scrollEl = scrollElRef.current;
+		if (!outer || !scrollEl) return;
+
+		const containerWidth = outer.getBoundingClientRect().width;
+		if (containerWidth < 10) return;
+
+		const cols = Math.max(
+			1,
+			Math.floor((containerWidth + GRID_GAP) / (MEDIA_MIN_COL + GRID_GAP)),
+		);
+		const cardWidth = (containerWidth - (cols - 1) * GRID_GAP) / cols;
+		// 4:3 aspect-ratio thumb + gap between rows
+		const rowH = Math.round(cardWidth * 0.75) + GRID_GAP;
+		const rowCount = Math.ceil(items.length / cols);
+
+		const { top: scrollTop, height: scrollH } =
+			scrollEl.getBoundingClientRect();
+		const outerTop = outer.getBoundingClientRect().top;
+		// Positive value = grid top has scrolled above the scroll-container top
+		const scrolledPast = scrollTop - outerTop;
+		const startRow = Math.max(
+			0,
+			Math.floor(scrolledPast / rowH) - OVERSCAN_ROWS,
+		);
+		const endRow = Math.min(
+			rowCount,
+			startRow + Math.ceil(scrollH / rowH) + OVERSCAN_ROWS * 2,
+		);
+
+		setRange({
+			startIdx: startRow * cols,
+			endIdx: Math.min(items.length, endRow * cols),
+			paddingTop: startRow * rowH,
+			paddingBottom: Math.max(0, (rowCount - endRow) * rowH),
+			cols,
+		});
+	}, [items.length]);
+
+	// Find nearest scrollable ancestor, attach scroll + resize listeners
+	useEffect(() => {
+		const outer = outerRef.current;
+		if (!outer) return;
+
+		let scrollEl = outer.parentElement;
+		while (scrollEl && scrollEl !== document.documentElement) {
+			const ov = getComputedStyle(scrollEl).overflowY;
+			if (ov === "auto" || ov === "scroll") break;
+			scrollEl = scrollEl.parentElement;
+		}
+		if (!scrollEl) return;
+		scrollElRef.current = scrollEl;
+
+		const onScroll = () => computeRange();
+		scrollEl.addEventListener("scroll", onScroll, { passive: true });
+
+		const ro = new ResizeObserver(computeRange);
+		ro.observe(outer);
+		ro.observe(scrollEl);
+
+		computeRange();
+
+		return () => {
+			scrollEl.removeEventListener("scroll", onScroll);
+			ro.disconnect();
+		};
+	}, [computeRange]);
+
+	// Re-compute when items change (e.g. search filter)
+	useEffect(() => {
+		computeRange();
+	}, [items, computeRange]);
+
+	const { startIdx, endIdx, paddingTop, paddingBottom, cols } = range;
+
+	return (
+		<div ref={outerRef}>
+			{items.length <= VIRTUAL_THRESHOLD ? (
+				<div className={`${styles.grid} ${styles.mediaGrid}`}>
+					{items.map((item) => (
+						<GridCard key={item.path} item={item} onClick={onClickItem} />
+					))}
+				</div>
+			) : (
+				<div style={{ paddingTop, paddingBottom }}>
+					<div className={styles.virtualGrid} style={{ "--vcols": cols }}>
+						{items.slice(startIdx, endIdx).map((item) => (
+							<GridCard key={item.path} item={item} onClick={onClickItem} />
+						))}
+					</div>
+				</div>
 			)}
 		</div>
 	);

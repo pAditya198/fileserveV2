@@ -6,12 +6,16 @@ function encPath(p) {
 	return p.split("/").map(encodeURIComponent).join("/");
 }
 
+const PREFETCH_AHEAD = 10;
+
 export default function Carousel({
 	items,
 	startIndex,
 	onClose,
 	togglestate,
 	toggleShowWithoutFilter,
+	hasMore,
+	onNearEnd,
 }) {
 	const [index, setIndex] = useState(startIndex);
 	const [fading, setFading] = useState(false);
@@ -19,6 +23,12 @@ export default function Carousel({
 	const videoRef = useRef(null);
 	const thumbsRef = useRef(null);
 	const touchX = useRef(null);
+	const itemsLenRef = useRef(items.length);
+
+	// Keep ref current on every render so setTimeout callbacks see live length
+	useEffect(() => {
+		itemsLenRef.current = items.length;
+	});
 
 	const current = items[index];
 
@@ -40,14 +50,30 @@ export default function Carousel({
 			if (videoRef.current) {
 				videoRef.current.pause();
 			}
+			// Prefetch next page when navigating forward near the end
+			if (
+				direction === 1 &&
+				hasMore &&
+				onNearEnd &&
+				index >= items.length - PREFETCH_AHEAD
+			) {
+				onNearEnd();
+			}
 			setDir(direction);
 			setFading(true);
 			setTimeout(() => {
-				setIndex((i) => (i + direction + items.length) % items.length);
+				const len = itemsLenRef.current;
+				setIndex((i) => {
+					const next = i + direction;
+					// When more pages exist, don't wrap forward past the last item
+					if (next >= len) return hasMore ? len - 1 : 0;
+					if (next < 0) return len - 1;
+					return next;
+				});
 				setFading(false);
 			}, 220);
 		},
-		[fading, items.length],
+		[fading, index, hasMore, onNearEnd],
 	);
 
 	const jumpTo = useCallback(
@@ -108,6 +134,7 @@ export default function Carousel({
 				<div className={styles.fileName}>{current?.name}</div>
 				<div className={styles.counter}>
 					{index + 1} / {items.length}
+					{hasMore ? "+" : ""}
 				</div>
 				{toggleShowWithoutFilter !== undefined && (
 					<Toggle
