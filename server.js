@@ -3,13 +3,19 @@ import express from 'express'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { createRequire } from 'module'
 import mime from 'mime-types'
 import os from 'os'
+
+const require = createRequire(import.meta.url)
+const AdmZip = require('adm-zip')
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
 const PORT = process.env.PORT || 3000
 const IS_PROD = process.env.NODE_ENV === 'production'
+
+app.use(express.json())
 
 const ROOT_DIR = path.resolve(process.argv[2] || process.env.SHARE_DIR || '.')
 const REAL_ROOT = fs.realpathSync(ROOT_DIR)
@@ -56,7 +62,7 @@ if (IS_PROD) {
 
 // ── Recursive walk ────────────────────────────────────────────────────────────
 function walkDir(fullDir, relBase, results = [], depth = 0) {
-  if (depth > 10) return results // safety cap
+  if (depth > 10) return results
   let entries
   try { entries = fs.readdirSync(fullDir, { withFileTypes: true }) } catch { return results }
 
@@ -83,10 +89,20 @@ function walkDir(fullDir, relBase, results = [], depth = 0) {
   return results
 }
 
-// ── API ───────────────────────────────────────────────────────────────────────
+function makeCounts(items) {
+  const c = { all: 0 }
+  for (const i of items) {
+    if (!i.isDirectory) c.all++
+    c[i.category] = (c[i.category] || 0) + 1
+  }
+  return c
+}
+
+// ── API: list directory ───────────────────────────────────────────────────────
 app.get('/api/files', (req, res) => {
   const reqPath = req.query.path || ''
   const recursive = req.query.recursive === 'true'
+  const category = req.query.category || 'all'   // server-side filter (used when recursive)
   const full = safePath(reqPath)
 
   if (!full) return res.status(403).json({ error: 'Forbidden' })
@@ -95,45 +111,92 @@ app.get('/api/files', (req, res) => {
   const stat = fs.statSync(full)
   if (!stat.isDirectory()) return res.status(400).json({ error: 'Not a directory' })
 
-  let items
-  if (recursive) {
-    items = walkDir(full, reqPath).filter(i => !i.isDirectory)
-  } else {
-    let entries
-    try { entries = fs.readdirSync(full, { withFileTypes: true }) }
-    catch (e) { return res.status(500).json({ error: e.message }) }
-
-    items = []
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue
-      const itemPath = path.join(full, entry.name)
-      let size = 0, mtime = null
-      try { const s = fs.statSync(itemPath); size = s.size; mtime = s.mtime } catch { }
-
-      const relPath = (reqPath ? reqPath + '/' : '') + entry.name
-      items.push({
-        name: entry.name,
-        isDirectory: entry.isDirectory(),
-        size,
-        sizeHuman: entry.isFile() ? fmtSize(size) : null,
-        mtime,
-        path: relPath.replace(/\\/g, '/'),
-        category: entry.isDirectory() ? 'folder' : categorize(entry.name),
-        ext: path.extname(entry.name).toLowerCase(),
-      })
-    }
-  }
-
-  items.sort((a, b) => {
-    if (!recursive && a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
-  })
-
   const parts = reqPath ? reqPath.split('/').filter(Boolean) : []
   const breadcrumb = [{ name: 'Home', path: '' }]
   parts.forEach((p, i) => breadcrumb.push({ name: p, path: parts.slice(0, i + 1).join('/') }))
 
-  res.json({ items, currentPath: reqPath, breadcrumb, recursive })
+  if (recursive) {
+    // Walk full tree — files only — then compute counts, then filter
+    const allFiles = walkDir(full, reqPath).filter(i => !i.isDirectory)
+    allFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+
+    const counts = makeCounts(allFiles)
+    const items = category && category !== 'all'
+      ? allFiles.filter(i => i.category === category)
+      : allFiles
+
+    return res.json({ items, counts, currentPath: reqPath, breadcrumb, recursive: true })
+  }
+
+  // Non-recursive: shallow read
+  let entries
+  try { entries = fs.readdirSync(full, { withFileTypes: true }) }
+  catch (e) { return res.status(500).json({ error: e.message }) }
+
+  const items = []
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue
+    const itemPath = path.join(full, entry.name)
+    let size = 0, mtime = null
+    try { const s = fs.statSync(itemPath); size = s.size; mtime = s.mtime } catch { }
+
+    const relPath = (reqPath ? reqPath + '/' : '') + entry.name
+    items.push({
+      name: entry.name,
+      isDirectory: entry.isDirectory(),
+      size,
+      sizeHuman: entry.isFile() ? fmtSize(size) : null,
+      mtime,
+      path: relPath.replace(/\\/g, '/'),
+      category: entry.isDirectory() ? 'folder' : categorize(entry.name),
+      ext: path.extname(entry.name).toLowerCase(),
+    })
+  }
+
+  items.sort((a, b) => {
+    if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+  })
+
+  const counts = makeCounts(items)
+  res.json({ items, counts, currentPath: reqPath, breadcrumb, recursive: false })
+})
+
+// ── API: unzip ────────────────────────────────────────────────────────────────
+app.post('/api/unzip', (req, res) => {
+  const { filePath } = req.body || {}
+  if (!filePath) return res.status(400).json({ error: 'filePath is required' })
+
+  const full = safePath(filePath)
+  if (!full) return res.status(403).json({ error: 'Forbidden' })
+  if (!fs.existsSync(full)) return res.status(404).json({ error: 'File not found' })
+
+  const ext = path.extname(full).toLowerCase()
+  if (ext !== '.zip') {
+    return res.status(400).json({
+      error: `Only .zip files are supported for extraction. Got: ${ext || '(no extension)'}`
+    })
+  }
+
+  const dir = path.dirname(full)
+  const baseName = path.basename(full, ext)
+
+  // Find a non-colliding folder name
+  let extractDir = path.join(dir, `${baseName}_extracted`)
+  let counter = 1
+  while (fs.existsSync(extractDir)) {
+    extractDir = path.join(dir, `${baseName}_extracted_${counter++}`)
+  }
+
+  try {
+    const zip = new AdmZip(full)
+    zip.extractAllTo(extractDir, /* overwrite */ true)
+
+    const relPath = path.relative(REAL_ROOT, extractDir).replace(/\\/g, '/')
+    res.json({ extractedPath: relPath, folderName: path.basename(extractDir) })
+  } catch (err) {
+    res.status(500).json({ error: `Extraction failed: ${err.message}` })
+  }
 })
 
 // ── File streaming ────────────────────────────────────────────────────────────

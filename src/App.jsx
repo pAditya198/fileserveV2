@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Header from "./components/Header.jsx";
 import FileBrowser from "./components/FileBrowser.jsx";
 import Carousel from "./components/Carousel.jsx";
@@ -7,6 +7,7 @@ import FileViewer from "./components/FileViewer.jsx";
 export default function App() {
 	const [currentPath, setCurrentPath] = useState("");
 	const [items, setItems] = useState([]);
+	const [counts, setCounts] = useState({});
 	const [breadcrumb, setBreadcrumb] = useState([{ name: "Home", path: "" }]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState(null);
@@ -15,7 +16,7 @@ export default function App() {
 	const [search, setSearch] = useState("");
 	const [recursive, setRecursive] = useState(false);
 
-	// Carousel state
+	// Carousel
 	const [carousel, setCarousel] = useState({
 		open: false,
 		items: [],
@@ -23,22 +24,42 @@ export default function App() {
 	});
 	const [showWithoutFilter, setShowWithoutFilter] = useState(false);
 
-	// FileViewer state
+	// FileViewer
 	const [viewerItem, setViewerItem] = useState(null);
 
-	// Load directory
+	// Avoid double-load on mount for the tab-change effect
+	const hasMounted = useRef(false);
+
+	// ── Core loader ─────────────────────────────────────────────────────────────
+	// opts: { recursive?: bool, category?: string }
+	// When recursive is on, category is passed to the server so it filters there.
+	// When recursive is off, category is omitted — client does the filtering.
 	const loadDir = useCallback(
-		async (dirPath, isRecursive) => {
-			const useRecursive = isRecursive !== undefined ? isRecursive : recursive;
+		async (dirPath, opts = {}) => {
+			const useRecursive =
+				opts.recursive !== undefined ? opts.recursive : recursive;
+			// In recursive mode use the passed category or the currently active tab
+			const useCategory = useRecursive
+				? opts.category !== undefined
+					? opts.category
+					: activeTab
+				: null;
+
 			setLoading(true);
 			setError(null);
 			setSearch("");
+
 			try {
-				const url = `/api/files?path=${encodeURIComponent(dirPath)}&recursive=${useRecursive}`;
+				let url = `/api/files?path=${encodeURIComponent(dirPath)}&recursive=${useRecursive}`;
+				if (useCategory && useCategory !== "all")
+					url += `&category=${encodeURIComponent(useCategory)}`;
+
 				const res = await fetch(url);
 				const data = await res.json();
 				if (data.error) throw new Error(data.error);
+
 				setItems(data.items);
+				setCounts(data.counts || {});
 				setBreadcrumb(data.breadcrumb);
 				setCurrentPath(dirPath);
 			} catch (e) {
@@ -47,22 +68,43 @@ export default function App() {
 				setLoading(false);
 			}
 		},
-		[recursive],
+		[recursive, activeTab],
 	);
 
+	// Initial load
 	useEffect(() => {
 		loadDir("");
 	}, []); // eslint-disable-line
 
+	// Reload when tab changes IF recursive is active (server needs to re-filter)
+	useEffect(() => {
+		if (!hasMounted.current) {
+			hasMounted.current = true;
+			return;
+		}
+		if (recursive)
+			loadDir(currentPath, { recursive: true, category: activeTab });
+	}, [activeTab]); // eslint-disable-line
+
+	// ── Toggles ─────────────────────────────────────────────────────────────────
 	const handleRecursiveToggle = useCallback(
 		(val) => {
 			setRecursive(val);
-			loadDir(currentPath, val);
+			loadDir(currentPath, {
+				recursive: val,
+				category: val ? activeTab : null,
+			});
 		},
-		[currentPath, loadDir],
+		[currentPath, activeTab, loadDir],
 	);
 
-	// Carousel
+	const handleTabChange = useCallback((tab) => {
+		setActiveTab(tab);
+		// If recursive, the useEffect above handles the reload.
+		// If not recursive, client-side filter — no reload needed.
+	}, []);
+
+	// ── Carousel ─────────────────────────────────────────────────────────────────
 	const openCarousel = useCallback(
 		(clickedItem) => {
 			const filterCategory =
@@ -84,15 +126,16 @@ export default function App() {
 		[items, activeTab, showWithoutFilter],
 	);
 
-	const closeCarousel = useCallback(() => {
-		setCarousel((c) => ({ ...c, open: false }));
-	}, []);
+	const closeCarousel = useCallback(
+		() => setCarousel((c) => ({ ...c, open: false })),
+		[],
+	);
 
 	const resetCarousel = useCallback(
-		(prevItemIndex, nextShowWithoutFilter) => {
+		(prevItemIndex, nextWithoutFilter) => {
 			const clickedItem = carousel.items[prevItemIndex];
 			const filterCategory =
-				activeTab === "all" || nextShowWithoutFilter
+				activeTab === "all" || nextWithoutFilter
 					? ["image", "video"]
 					: [activeTab];
 			const mediaItems = items.filter(
@@ -121,9 +164,27 @@ export default function App() {
 		[resetCarousel],
 	);
 
-	// FileViewer
+	// ── FileViewer ───────────────────────────────────────────────────────────────
 	const openViewer = useCallback((item) => setViewerItem(item), []);
 	const closeViewer = useCallback(() => setViewerItem(null), []);
+
+	// ── Unzip ────────────────────────────────────────────────────────────────────
+	const handleUnzip = useCallback(
+		async (item) => {
+			const res = await fetch("/api/unzip", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ filePath: item.path }),
+			});
+			const data = await res.json();
+			if (data.error) throw new Error(data.error);
+			// Close viewer and navigate into the extracted folder
+			setViewerItem(null);
+			loadDir(data.extractedPath);
+			return data;
+		},
+		[loadDir],
+	);
 
 	return (
 		<>
@@ -135,10 +196,11 @@ export default function App() {
 			/>
 			<FileBrowser
 				items={items}
+				counts={counts}
 				loading={loading}
 				error={error}
 				activeTab={activeTab}
-				onTabChange={setActiveTab}
+				onTabChange={handleTabChange}
 				viewMode={viewMode}
 				onViewChange={setViewMode}
 				search={search}
@@ -157,7 +219,13 @@ export default function App() {
 					toggleShowWithoutFilter={handleToggleShowWithoutFilter}
 				/>
 			)}
-			{viewerItem && <FileViewer item={viewerItem} onClose={closeViewer} />}
+			{viewerItem && (
+				<FileViewer
+					item={viewerItem}
+					onClose={closeViewer}
+					onUnzip={handleUnzip}
+				/>
+			)}
 		</>
 	);
 }

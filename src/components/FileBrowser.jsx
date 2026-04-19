@@ -33,6 +33,7 @@ function encPath(p) {
 
 export default function FileBrowser({
 	items,
+	counts,
 	loading,
 	error,
 	activeTab,
@@ -46,18 +47,17 @@ export default function FileBrowser({
 	onOpenCarousel,
 	onOpenViewer,
 }) {
-	const counts = useMemo(() => {
-		const c = { all: items.length };
-		for (const item of items) c[item.category] = (c[item.category] || 0) + 1;
-		return c;
-	}, [items]);
-
+	// In recursive mode the server already filtered by category,
+	// so we only need to apply search client-side.
+	// In non-recursive mode we filter by tab AND search client-side.
 	const filtered = useMemo(() => {
 		const q = search.toLowerCase();
 		return items
-			.filter((i) => activeTab === "all" || i.category === activeTab)
+			.filter((i) =>
+				recursive ? true : activeTab === "all" || i.category === activeTab,
+			)
 			.filter((i) => !q || i.name.toLowerCase().includes(q));
-	}, [items, activeTab, search]);
+	}, [items, activeTab, search, recursive]);
 
 	function handleClick(item) {
 		if (item.isDirectory) {

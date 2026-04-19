@@ -47,6 +47,7 @@ const AUDIO_EXTS = new Set([
 	".opus",
 	".aiff",
 ]);
+const ZIP_ONLY = new Set([".zip"]); // only .zip can be extracted via adm-zip
 
 function viewerType(ext) {
 	if (ext === PDF_EXT) return "pdf";
@@ -57,30 +58,35 @@ function viewerType(ext) {
 	return "download";
 }
 
-export default function FileViewer({ item, onClose }) {
+// Extract states: 'idle' | 'loading' | 'done' | 'error'
+export default function FileViewer({ item, onClose, onUnzip }) {
 	const [textContent, setTextContent] = useState(null);
 	const [textError, setTextError] = useState(null);
-	const [loading, setLoading] = useState(false);
+	const [textLoading, setTextLoading] = useState(false);
+	const [extractState, setExtractState] = useState("idle"); // archive extract
+	const [extractError, setExtractError] = useState(null);
+	const [extractedName, setExtractedName] = useState(null);
 
 	const type = viewerType(item.ext);
 	const fileUrl = `/files/${encPath(item.path)}`;
 
+	// Fetch text content
 	useEffect(() => {
 		if (type !== "text") return;
-		setLoading(true);
+		setTextLoading(true);
 		fetch(fileUrl)
 			.then((r) => r.text())
 			.then((t) => {
 				setTextContent(t);
-				setLoading(false);
+				setTextLoading(false);
 			})
 			.catch((e) => {
 				setTextError(e.message);
-				setLoading(false);
+				setTextLoading(false);
 			});
 	}, [fileUrl, type]);
 
-	// Close on Escape
+	// Keyboard: Escape closes
 	useEffect(() => {
 		const h = (e) => {
 			if (e.key === "Escape") onClose();
@@ -88,6 +94,23 @@ export default function FileViewer({ item, onClose }) {
 		window.addEventListener("keydown", h);
 		return () => window.removeEventListener("keydown", h);
 	}, [onClose]);
+
+	async function handleExtract() {
+		if (!onUnzip || extractState === "loading") return;
+		setExtractState("loading");
+		setExtractError(null);
+		try {
+			const data = await onUnzip(item);
+			setExtractedName(data.folderName);
+			setExtractState("done");
+			// onUnzip already navigates — modal will close via onClose from App
+		} catch (e) {
+			setExtractError(e.message);
+			setExtractState("error");
+		}
+	}
+
+	const canExtract = ZIP_ONLY.has(item.ext) && !!onUnzip;
 
 	return (
 		<div
@@ -115,7 +138,11 @@ export default function FileViewer({ item, onClose }) {
 						>
 							<DownloadIcon /> Download
 						</a>
-						<button className={styles.closeBtn} onClick={onClose} title="Close">
+						<button
+							className={styles.closeBtn}
+							onClick={onClose}
+							title="Close (Esc)"
+						>
 							✕
 						</button>
 					</div>
@@ -123,6 +150,7 @@ export default function FileViewer({ item, onClose }) {
 
 				{/* Body */}
 				<div className={styles.body}>
+					{/* ── PDF ── */}
 					{type === "pdf" && (
 						<iframe
 							className={styles.pdfFrame}
@@ -131,6 +159,7 @@ export default function FileViewer({ item, onClose }) {
 						/>
 					)}
 
+					{/* ── Audio ── */}
 					{type === "audio" && (
 						<div className={styles.audioWrap}>
 							<div className={styles.audioArt}>
@@ -160,16 +189,20 @@ export default function FileViewer({ item, onClose }) {
 							/>
 						</div>
 					)}
-					{loading ? (
-						<div className={styles.centered}>
-							<div className={styles.spinner} />
-						</div>
-					) : textError ? (
-						<div className={styles.errorMsg}>⚠ {textError}</div>
-					) : (
-						<pre className={styles.textContent}>{textContent}</pre>
-					)}
 
+					{/* ── Text / Code ── */}
+					{type === "text" &&
+						(textLoading ? (
+							<div className={styles.centered}>
+								<div className={styles.spinner} />
+							</div>
+						) : textError ? (
+							<div className={styles.errorMsg}>⚠ {textError}</div>
+						) : (
+							<pre className={styles.textContent}>{textContent}</pre>
+						))}
+
+					{/* ── Office ── */}
 					{type === "office" && (
 						<div className={styles.unsupported}>
 							<div className={styles.unsupportedIcon}>{fileIcon(item)}</div>
@@ -185,21 +218,80 @@ export default function FileViewer({ item, onClose }) {
 						</div>
 					)}
 
+					{/* ── Archive ── */}
 					{type === "archive" && (
 						<div className={styles.unsupported}>
 							<div className={styles.unsupportedIcon}>{fileIcon(item)}</div>
-							<h3>Archive preview not supported</h3>
-							<p>Download and extract this archive to view its contents.</p>
+							<h3>{item.name}</h3>
+							<p className={styles.archiveSub}>
+								{item.sizeHuman} · {item.ext.slice(1).toUpperCase()} archive
+							</p>
+
+							{/* Extract action — only for .zip */}
+							{canExtract && extractState === "idle" && (
+								<div className={styles.extractRow}>
+									<button
+										className={`${styles.btn} ${styles.btnExtract}`}
+										onClick={handleExtract}
+									>
+										<ExtractIcon /> Extract here
+									</button>
+									<span className={styles.extractHint}>
+										Creates a{" "}
+										<code>{item.name.replace(/\.zip$/i, "")}_extracted</code>{" "}
+										folder next to this file
+									</span>
+								</div>
+							)}
+
+							{canExtract && extractState === "loading" && (
+								<div className={styles.extractStatus}>
+									<div className={styles.spinner} />
+									<span>Extracting…</span>
+								</div>
+							)}
+
+							{canExtract && extractState === "done" && (
+								<div
+									className={`${styles.extractStatus} ${styles.extractDone}`}
+								>
+									✓ Extracted to <strong>{extractedName}</strong> — navigating
+									there…
+								</div>
+							)}
+
+							{canExtract && extractState === "error" && (
+								<div className={styles.extractStatus}>
+									<div className={styles.errorMsg}>⚠ {extractError}</div>
+									<button
+										className={`${styles.btn} ${styles.btnExtract}`}
+										onClick={handleExtract}
+									>
+										<ExtractIcon /> Retry
+									</button>
+								</div>
+							)}
+
+							{!canExtract && (
+								<p className={styles.extractUnsupported}>
+									Only <code>.zip</code> files can be extracted. For{" "}
+									<code>{item.ext}</code> files, download and use your system's
+									archive tool.
+								</p>
+							)}
+
 							<a
-								className={`${styles.btn} ${styles.btnPrimary}`}
+								className={styles.btn}
 								href={`${fileUrl}?dl=1`}
 								download={item.name}
+								style={{ marginTop: 8 }}
 							>
-								<DownloadIcon /> Download {item.name}
+								<DownloadIcon /> Download archive
 							</a>
 						</div>
 					)}
 
+					{/* ── Unknown / fallback ── */}
 					{type === "download" && (
 						<div className={styles.unsupported}>
 							<div className={styles.unsupportedIcon}>{fileIcon(item)}</div>
@@ -246,6 +338,23 @@ function DownloadIcon() {
 			<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
 			<polyline points="7 10 12 15 17 10" />
 			<line x1="12" y1="15" x2="12" y2="3" />
+		</svg>
+	);
+}
+
+function ExtractIcon() {
+	return (
+		<svg
+			width="13"
+			height="13"
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="2.5"
+		>
+			<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+			<polyline points="17 8 12 3 7 8" />
+			<line x1="12" y1="3" x2="12" y2="15" />
 		</svg>
 	);
 }
