@@ -102,7 +102,11 @@ function makeCounts(items) {
 app.get('/api/files', (req, res) => {
   const reqPath = req.query.path || ''
   const recursive = req.query.recursive === 'true'
-  const category = req.query.category || 'all'   // server-side filter (used when recursive)
+  // category can be a single value or comma-separated list e.g. "image,video"
+  const categoryParam = req.query.category || 'all'
+  const categories = categoryParam === 'all'
+    ? null
+    : categoryParam.split(',').map(c => c.trim()).filter(Boolean)
   const offset = Math.max(0, parseInt(req.query.offset) || 0)
   const limit = Math.min(2000, Math.max(1, parseInt(req.query.limit) || 200))
   const full = safePath(reqPath)
@@ -123,13 +127,16 @@ app.get('/api/files', (req, res) => {
     allFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
 
     const counts = makeCounts(allFiles)
-    const filtered = category && category !== 'all'
-      ? allFiles.filter(i => i.category === category)
+    console.log(`Total files before category filter: ${counts.all}`, categories)
+    const filtered = categories
+      ? allFiles.filter(i => categories.includes(i.category))
       : allFiles
+
+    console.log(`Total files after category filter: ${filtered.length} (category=${categoryParam})`)
 
     const total = filtered.length
     const items = filtered.slice(offset, offset + limit)
-    console.log(`Recursive load: ${total} items (category=${category}, offset=${offset}, limit=${limit})`)
+    console.log(`Recursive load: ${total} items (category=${categoryParam}, offset=${offset}, limit=${limit})`)
 
     return res.json({ items, counts, total, currentPath: reqPath, breadcrumb, recursive: true })
   }

@@ -24,11 +24,28 @@ export default function Carousel({
 	const thumbsRef = useRef(null);
 	const touchX = useRef(null);
 	const itemsLenRef = useRef(items.length);
+	// Tracks the path of the item currently on screen so we can re-find it
+	// when the items array is replaced (e.g. "All media" toggle refilters).
+	const currentPathRef = useRef(items[startIndex]?.path ?? null);
 
-	// Keep ref current on every render so setTimeout callbacks see live length
+	// Keep itemsLenRef current on every render (used in setTimeout)
 	useEffect(() => {
 		itemsLenRef.current = items.length;
 	});
+
+	// Update currentPathRef whenever the user navigates to a new item
+	useEffect(() => {
+		currentPathRef.current = items[index]?.path ?? null;
+	}, [index]); // eslint-disable-line
+
+	// When the items array is replaced (toggle / filter change), keep showing
+	// the same item by finding its path in the new list.
+	useEffect(() => {
+		const path = currentPathRef.current;
+		if (!path) return;
+		const newIdx = items.findIndex((i) => i.path === path);
+		if (newIdx !== -1) setIndex(newIdx);
+	}, [items]); // eslint-disable-line
 
 	const current = items[index];
 

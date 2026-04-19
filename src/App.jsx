@@ -261,14 +261,46 @@ export default function App() {
 	);
 
 	const handleToggleShowWithoutFilter = useCallback(
-		(currentIndex) => {
-			setShowWithoutFilter((prev) => {
-				const next = !prev;
+		async (currentIndex) => {
+			const next = !showWithoutFilter;
+			setShowWithoutFilter(next);
+
+			if (next && recursive && activeTab !== "all") {
+				// Recursive + single-category tab: items only has one category.
+				// Fetch images and videos in parallel (server accepts one category at a
+				// time) then merge so the carousel can show all media.
+				const clickedItem = carousel.items[currentIndex];
+				try {
+					const base =
+						`/api/files?path=${encodeURIComponent(currentPath)}` +
+						`&recursive=true&offset=0&limit=${PAGE_SIZE}&category=image,video`;
+					const data = await fetch(base).then((r) => r.json());
+					if (data.error) throw new Error(data.error);
+					const allMedia = data.items || [];
+					const startIndex = allMedia.findIndex(
+						(i) => i.path === clickedItem?.path,
+					);
+					setCarousel({
+						open: true,
+						items: allMedia,
+						index: Math.max(0, startIndex),
+					});
+				} catch {
+					// fall back to what's already loaded
+					resetCarousel(currentIndex, next);
+				}
+			} else {
 				resetCarousel(currentIndex, next);
-				return next;
-			});
+			}
 		},
-		[resetCarousel],
+		[
+			showWithoutFilter,
+			recursive,
+			activeTab,
+			currentPath,
+			carousel,
+			resetCarousel,
+		],
 	);
 
 	// ── FileViewer ───────────────────────────────────────────────────────────────
