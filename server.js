@@ -67,8 +67,8 @@ if (IS_PROD) {
   app.use(express.static(path.join(__dirname, 'dist')))
 }
 
-// ── Recursive walk ────────────────────────────────────────────────────────────
-function walkDir(fullDir, relBase, results = [], depth = 0) {
+// ── Recursive walk (async — yields after each dir to keep event loop free) ────
+async function walkDirAsync(fullDir, relBase, results = [], depth = 0) {
   if (depth > 10) return results
   let entries
   try { entries = fs.readdirSync(fullDir, { withFileTypes: true }) } catch { return results }
@@ -91,8 +91,10 @@ function walkDir(fullDir, relBase, results = [], depth = 0) {
       ext: path.extname(entry.name).toLowerCase(),
     })
 
-    if (entry.isDirectory()) walkDir(itemFull, relPath, results, depth + 1)
+    if (entry.isDirectory()) await walkDirAsync(itemFull, relPath, results, depth + 1)
   }
+  // Yield after each directory so the event loop can handle requests mid-walk
+  await new Promise(resolve => setImmediate(resolve))
   return results
 }
 
