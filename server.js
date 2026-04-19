@@ -155,7 +155,7 @@ function saveIndex() {
   try {
     fs.writeFileSync(
       INDEX_CACHE_FILE,
-      JSON.stringify({ v: 1, root: REAL_ROOT, entries: [...fileIndex.values()] }),
+      JSON.stringify({ v: 1, root: REAL_ROOT, savedAt: Date.now(), entries: [...fileIndex.values()] }),
       'utf8'
     )
   } catch (e) { console.warn('Failed to save index cache:', e.message) }
@@ -169,21 +169,21 @@ function scheduleSave() {
 
 async function loadIndex() {
   try {
-    if (!fs.existsSync(INDEX_CACHE_FILE)) return false
+    if (!fs.existsSync(INDEX_CACHE_FILE)) return 0
     const raw = await fs.promises.readFile(INDEX_CACHE_FILE, 'utf8')
     // Yield before the potentially heavy JSON.parse so the event loop stays free
     await new Promise(resolve => setImmediate(resolve))
     const data = JSON.parse(raw)
-    if (data.v !== 1 || data.root !== REAL_ROOT) return false
+    if (data.v !== 1 || data.root !== REAL_ROOT) return 0
     fileIndex.clear()
     for (const e of data.entries) fileIndex.set(e.path, e)
     buildDirChildren()
     indexReady = true
-    console.log(`Index restored from cache: ${fileIndex.size} entries`)
-    return true
+    console.log(`Index restored from cache: ${fileIndex.size} entries (saved ${new Date(data.savedAt).toISOString()})`)
+    return data.savedAt || 0
   } catch (e) {
     console.warn('Failed to load index cache:', e.message)
-    return false
+    return 0
   }
 }
 
@@ -199,6 +199,59 @@ async function buildIndex() {
   console.log(`Index ready: ${fileIndex.size} entries in ${Date.now() - t}ms`)
   buildDirChildren()
   saveIndex()
+}
+
+// Incremental sync — only updates entries that changed since the cache was saved
+async function syncIndex(savedAt) {
+  indexing = true
+  console.log(`Syncing index against filesystem (cache from ${new Date(savedAt).toISOString()})...`)
+  const t = Date.now()
+  const seenPaths = new Set()
+  let changed = 0
+
+  async function walk(fullDir, relBase, depth = 0) {
+    if (depth > 10) return
+    let entries
+    try { entries = fs.readdirSync(fullDir, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue
+      const itemFull = path.join(fullDir, entry.name)
+      const rel = ((relBase ? relBase + '/' : '') + entry.name).replace(/\\/g, '/')
+      let size = 0, mtime = null
+      try { const s = fs.statSync(itemFull); size = s.size; mtime = s.mtime } catch { continue }
+      seenPaths.add(rel)
+      const mtimeMs = mtime ? mtime.getTime() : 0
+      if (mtimeMs > savedAt || !fileIndex.has(rel)) {
+        fileIndex.set(rel, {
+          name: entry.name,
+          isDirectory: entry.isDirectory(),
+          size,
+          sizeHuman: entry.isFile() ? fmtSize(size) : null,
+          mtime,
+          path: rel,
+          category: entry.isDirectory() ? 'folder' : categorize(entry.name),
+          ext: path.extname(entry.name).toLowerCase(),
+        })
+        changed++
+      }
+      if (entry.isDirectory()) await walk(itemFull, rel, depth + 1)
+    }
+    await new Promise(resolve => setImmediate(resolve))
+  }
+
+  await walk(REAL_ROOT, '')
+
+  // Remove stale entries (deleted from disk since cache was saved)
+  for (const key of fileIndex.keys()) {
+    if (!seenPaths.has(key)) { fileIndex.delete(key); changed++ }
+  }
+
+  indexing = false
+  console.log(`Sync complete: ${changed} change(s) in ${Date.now() - t}ms (${fileIndex.size} total entries)`)
+  if (changed > 0) {
+    buildDirChildren()
+    saveIndex()
+  }
 }
 
 const pendingChanges = new Set()
@@ -255,10 +308,14 @@ function startWatcher() {
   }
 }
 
-// Await loadIndex first so buildIndex doesn't race and overwrite a valid cache restore
+// Await loadIndex first so startup logic can decide what kind of refresh is needed
 async function startup() {
-  await loadIndex()
-  buildIndex()   // fire-and-forget: runs in background, server is already listening
+  const savedAt = await loadIndex()
+  if (savedAt) {
+    syncIndex(savedAt)  // cache hit — only walk to find what changed
+  } else {
+    buildIndex()        // no cache — full walk
+  }
   startWatcher()
 }
 startup()
@@ -347,6 +404,27 @@ app.post('/api/unzip', (req, res) => {
     zip.extractAllTo(extractDir, /* overwrite */ true)
 
     const relPath = path.relative(REAL_ROOT, extractDir).replace(/\\/g, '/')
+
+    // Index the extracted folder immediately so it's visible without waiting for the watcher
+    walkDirAsync(extractDir, relPath).then(newEntries => {
+      // Add the folder entry itself
+      const folderName = path.basename(extractDir)
+      const parentRel = path.relative(REAL_ROOT, dir).replace(/\\/g, '/')
+      fileIndex.set(relPath, {
+        name: folderName,
+        isDirectory: true,
+        size: 0,
+        sizeHuman: null,
+        mtime: new Date(),
+        path: relPath,
+        category: 'folder',
+        ext: '',
+      })
+      for (const e of newEntries) fileIndex.set(e.path, e)
+      buildDirChildren()
+      scheduleSave()
+    })
+
     res.json({ extractedPath: relPath, folderName: path.basename(extractDir) })
   } catch (err) {
     res.status(500).json({ error: `Extraction failed: ${err.message}` })
