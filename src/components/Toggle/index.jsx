@@ -1,4 +1,4 @@
-import styles from "./Toggle.module.css";
+import styles from "./styles.module.css";
 
 /**
  * Toggle  –  reusable pill-style toggle switch

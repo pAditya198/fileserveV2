@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import Header from "./components/Header.jsx";
-import FileBrowser from "./components/FileBrowser.jsx";
-import Carousel from "./components/Carousel.jsx";
-import FileViewer from "./components/FileViewer.jsx";
+import Header from "./components/Header";
+import FileBrowser from "./components/FileBrowser";
+import Carousel from "./components/Carousel";
+import FileViewer from "./components/FileViewer";
 
 const PAGE_SIZE = 200;
 

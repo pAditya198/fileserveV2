@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, useEffect, useCallback } from "react";
 import styles from "./styles.module.css";
-import Toggle from "./Toggle.jsx";
+import Toggle from "../Toggle";
+import { GridIcon, ListIcon, DownloadIcon } from "../../icons";
 
 const TABS = [
 	{ key: "all", label: "All", emoji: null },
@@ -293,7 +294,7 @@ function GridCard({ item, onClick }) {
 							onClick={(e) => e.stopPropagation()}
 							title="Download"
 						>
-							<DownloadIcon />
+							<DownloadIcon size={12} strokeWidth={2.5} />
 						</a>
 					</div>
 				</div>
@@ -307,7 +308,7 @@ function GridCard({ item, onClick }) {
 					onClick={(e) => e.stopPropagation()}
 					title="Download"
 				>
-					<DownloadIcon />
+					<DownloadIcon size={12} strokeWidth={2.5} />
 				</a>
 			)}
 		</div>
@@ -477,56 +478,5 @@ function ListView({ items, onClickItem }) {
 				))}
 			</tbody>
 		</table>
-	);
-}
-
-// ── Icons ─────────────────────────────────────────────────────────────────────
-function GridIcon() {
-	return (
-		<svg
-			width="14"
-			height="14"
-			viewBox="0 0 24 24"
-			fill="none"
-			stroke="currentColor"
-			strokeWidth="2"
-		>
-			<rect x="3" y="3" width="7" height="7" />
-			<rect x="14" y="3" width="7" height="7" />
-			<rect x="3" y="14" width="7" height="7" />
-			<rect x="14" y="14" width="7" height="7" />
-		</svg>
-	);
-}
-function ListIcon() {
-	return (
-		<svg
-			width="14"
-			height="14"
-			viewBox="0 0 24 24"
-			fill="none"
-			stroke="currentColor"
-			strokeWidth="2"
-		>
-			<line x1="3" y1="6" x2="21" y2="6" />
-			<line x1="3" y1="12" x2="21" y2="12" />
-			<line x1="3" y1="18" x2="21" y2="18" />
-		</svg>
-	);
-}
-function DownloadIcon() {
-	return (
-		<svg
-			width="12"
-			height="12"
-			viewBox="0 0 24 24"
-			fill="none"
-			stroke="currentColor"
-			strokeWidth="2.5"
-		>
-			<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
-			<polyline points="7 10 12 15 17 10" />
-			<line x1="12" y1="15" x2="12" y2="3" />
-		</svg>
 	);
 }
