@@ -1,16 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import styles from "./styles.module.css";
-import Toggle from "../Toggle";
-import {
-	DownloadIcon,
-	CloseIcon,
-	ChevronLeft,
-	ChevronRight,
-} from "../../icons";
-
-function encPath(p) {
-	return p.split("/").map(encodeURIComponent).join("/");
-}
+import TopBar from "./TopBar";
+import MediaStage from "./MediaStage";
+import ThumbnailStrip from "./ThumbnailStrip";
 
 const PREFETCH_AHEAD = 10;
 
@@ -152,115 +144,33 @@ export default function Carousel({
 			onTouchStart={onTouchStart}
 			onTouchEnd={onTouchEnd}
 		>
-			{/* Top bar */}
-			<div className={styles.topBar}>
-				<div className={styles.fileName}>{current?.name}</div>
-				<div className={styles.counter}>
-					{index + 1} / {items.length}
-					{hasMore ? "+" : ""}
-				</div>
-				{toggleShowWithoutFilter !== undefined && (
-					<Toggle
-						checked={!!togglestate}
-						onChange={() => toggleShowWithoutFilter(index)}
-						label="All media"
-						title="Show all images & videos regardless of active tab filter"
-						size="sm"
-					/>
-				)}
-				<div className={styles.topActions}>
-					<a
-						className={styles.topBtn}
-						href={`/files/${encPath(current?.path)}`}
-						download={current?.name}
-						title="Download"
-					>
-						<DownloadIcon />
-					</a>
-					<button
-						className={styles.topBtn}
-						onClick={onClose}
-						title="Close (Esc)"
-					>
-						<CloseIcon />
-					</button>
-				</div>
-			</div>
+			<TopBar
+				current={current}
+				index={index}
+				itemCount={items.length}
+				hasMore={hasMore}
+				togglestate={togglestate}
+				toggleShowWithoutFilter={toggleShowWithoutFilter}
+				onClose={onClose}
+			/>
 
-			{/* Main stage */}
-			<div className={styles.stage}>
-				{/* Left arrow */}
-				{items.length > 1 && (
-					<button
-						className={`${styles.arrow} ${styles.arrowLeft}`}
-						onClick={() => navigate(-1)}
-						aria-label="Previous"
-					>
-						<ChevronLeft />
-					</button>
-				)}
+			<MediaStage
+				current={current}
+				isImage={isImage}
+				isVideo={isVideo}
+				fading={fading}
+				dir={dir}
+				videoRef={videoRef}
+				navigate={navigate}
+				itemsLength={items.length}
+			/>
 
-				{/* Media content */}
-				<div
-					className={`${styles.mediaWrap} ${fading ? (dir > 0 ? styles.fadeOutLeft : styles.fadeOutRight) : styles.fadeIn}`}
-				>
-					{isImage && (
-						<img
-							className={styles.img}
-							src={`/files/${encPath(current.path)}`}
-							alt={current.name}
-							draggable={false}
-						/>
-					)}
-					{isVideo && (
-						<video
-							key={current.path}
-							ref={videoRef}
-							className={styles.video}
-							src={`/files/${encPath(current.path)}`}
-							controls
-							autoPlay
-							preload="metadata"
-						/>
-					)}
-				</div>
-
-				{/* Right arrow */}
-				{items.length > 1 && (
-					<button
-						className={`${styles.arrow} ${styles.arrowRight}`}
-						onClick={() => navigate(1)}
-						aria-label="Next"
-					>
-						<ChevronRight />
-					</button>
-				)}
-			</div>
-
-			{/* Thumbnail strip */}
-			{items.length > 1 && (
-				<div className={styles.thumbStrip} ref={thumbsRef}>
-					{items.map((item, i) => (
-						<div
-							key={item.path}
-							className={`${styles.thumb} ${i === index ? styles.thumbActive : ""}`}
-							data-active={i === index}
-							onClick={() => jumpTo(i)}
-						>
-							{item.category === "image" ? (
-								<img
-									src={`/files/${encPath(item.path)}`}
-									alt={item.name}
-									loading="lazy"
-									draggable={false}
-								/>
-							) : (
-								<div className={styles.thumbVideo}>▶</div>
-							)}
-						</div>
-					))}
-				</div>
-			)}
+			<ThumbnailStrip
+				items={items}
+				index={index}
+				jumpTo={jumpTo}
+				thumbsRef={thumbsRef}
+			/>
 		</div>
 	);
 }
