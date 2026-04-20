@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, useEffect, useCallback } from "react";
-import styles from "./FileBrowser.module.css";
+import styles from "./styles.module.css";
 import Toggle from "./Toggle.jsx";
 
 const TABS = [

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import styles from "./FileViewer.module.css";
+import styles from "./styles.module.css";
 
 function encPath(p) {
 	return p.split("/").map(encodeURIComponent).join("/");
